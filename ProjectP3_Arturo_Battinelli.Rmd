@@ -1,0 +1,482 @@
+Project 3 - Data Analysis using R by Arturo Battinelli
+========================================================
+
+This project is about the analysis of the data related to the Financial Contributions to 2012 Presidential Campaigns in the State of Massachusetts. The dataset has been downloaded from the Federal Election Commission's website (http://www.fec.gov).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+
+# Load the packages
+
+# Uncomment the following lines in case the below libraries are not installed on your machine
+
+#install.packages('zipcode', dependencies = T)
+#install.packages('dplyr', dependencies = T)
+#install.packages('RColorBrewer', dependencies = T)
+#install.packages('wordcloud', dependencies = T)
+#install.packages('grid', dependencies = T)
+#install.packages('gridExtra', dependencies = T)
+#install.packages('GGally', dependencies = T)
+#install.packages('scales', dependencies = T)
+#install.packages('memisc', dependencies = T)
+#install.packages('reshape2', dependencies = T)
+
+
+library(ggplot2)
+library(dplyr)
+library(zipcode)
+library(RColorBrewer)
+library(wordcloud)
+library(grid)
+library(gridExtra)
+library(GGally)
+library(scales)
+library(memisc)
+library(reshape2)
+
+# Setting the local directory - to be changed for execution on other machines
+setwd('C:/Users/105053093/Box Sync/attivita/2015/20150101_Nanodegree/class/3 - Data Analysis Using R/Project/ProjectP3_Arturo_Battinelli')
+
+```
+
+```{r echo=FALSE, Load_the_Data}
+
+# Load the Data
+
+# The goal here is to geo-referentiate the data in the Massachusetts 2012 election dataset.
+# In order to do so, we will use the following dataset from the "zipcode" package.
+data(zipcode)
+
+# Let's check that the zipcode dataset has only one row for each zip code
+
+# First we create a temprary dataset, grouping by zip code
+zipcode_granularity_check <- zipcode %>%
+  group_by(zip) %>% 
+  summarise(n = n());
+
+# The following command would stop the execution if there was a zip code with more than one row in the dataset
+stopifnot(max(zipcode_granularity_check$n) == 1)
+
+# We can remove the temporary dataset
+rm(zipcode_granularity_check)
+
+# We want to enrich the zipcode dataset with a new column showing the distance of the zipcode from the center of Boston
+# The following function calculates the distance in kilometers between two points (given the coordinates)
+gcd.slc <- function(long1, lat1, long2, lat2) {
+  R <- 6371 # Earth mean radius [km]
+  d <- acos(sin(lat1)*sin(lat2) + cos(lat1)*cos(lat2) * cos(long2-long1)) * R
+  return(d) # Distance in km
+}
+
+# Since the above functions needs angles expressed in radians, we will need the following function that converts degrees into radians
+deg2rad <- function(deg) return(deg*pi/180)
+
+# We can now calculate the distance of each zipcode in the dataset from the center of Boston (zip code = 02116)
+zipcode$distance <- gcd.slc(deg2rad(zipcode$longitude), 
+                            deg2rad(zipcode$latitude), 
+                            deg2rad(zipcode$longitude[zipcode$zip == "02116"]), 
+                            deg2rad(zipcode$latitude[zipcode$zip == "02116"]))
+
+# Now we import the Massachusetts 2012 election CSV file
+ma2012_init <- read.csv('MA_2012.csv', row.names = NULL)
+
+# In order to join this dataset with the zipcode dataset, we need to clan up the zip code by removing the "*" as well as any character after the first 5 
+ma2012_init$contbr_zip_clean <- gsub("\\*", "", ma2012_init$contbr_zip)
+ma2012_init$zip <- ifelse(substr(ma2012_init$contbr_zip_clean, 1, 1) == "0", substr(ma2012_init$contbr_zip_clean, 1, 5), paste("0", substr(ma2012_init$contbr_zip_clean, 1, 4), sep=""))
+
+#unique(ma2012_init$zip)
+
+# We can now join the two datasets
+ma2012 <- left_join(ma2012_init, zipcode, by = "zip")
+
+# We add a factor for the cancidate's gender
+ma2012$cand_gender <- "Male"
+ma2012$cand_gender[ma2012$cand_nm == "Bachmann, Michele" | ma2012$cand_nm == "Stein, Jill"] <- "Female"
+ma2012$cand_gender <- as.factor(ma2012$cand_gender)
+
+# We add a factor for the cancidate's party
+ma2012$cand_party <- "Republican"
+ma2012$cand_party[ma2012$cand_nm == "Obama, Barack"] <- "Democrat"
+ma2012$cand_party[ma2012$cand_nm == "Cain, Herman"] <- "Tea"
+ma2012$cand_party[ma2012$cand_nm == "Johnson, Gary Earl"] <- "Libertarian"
+ma2012$cand_party[ma2012$cand_nm == "Stein, Jill"] <- "Green"
+ma2012$cand_party <- ordered(as.factor(ma2012$cand_party), levels = c("Democrat", "Republican", "Libertarian", "Tea", "Green"))
+
+# Transforming other variables into factors
+ma2012$city <- as.factor(ma2012$city)
+
+# Transforming the contribution's receipt date from factor to date
+ma2012$contb_receipt_dt <- as.Date(ma2012$contb_receipt_dt, format = "%d-%b-%y")
+
+# Adding the difference in days between the contribution's receipt date and the date of the elections (6 Nov 2012)
+ma2012$days_togo <- -as.numeric(difftime(ma2012$contb_receipt_dt, as.Date("06-NOV-12", format = "%d-%b-%y"), units="days"))
+
+# Our final dataset is called ma2012 and contains the 2012 elections data for Massachusetts.
+# The dataset has now an additional column called "distance" indicating the distance of the zipcode where the person resides from the center of Boston.
+
+```
+
+# Univariate Plots Section
+
+Let's run some basic command to get an overview of the data
+
+```{r, Univariate_Plots_basicStats}
+
+names(ma2012)
+length(ma2012)
+nrow(ma2012)
+dim(ma2012)
+head(ma2012)
+summary(ma2012)
+table(ma2012$cand_nm)
+table(ma2012$cand_gender)
+table(ma2012$cand_party)
+table(ma2012$election_tp)
+summary(ma2012$contb_receipt_amt)
+summary(ma2012$distance)
+summary(subset(ma2012, ma2012$contb_receipt_amt < 0))
+```
+
+Let's now check the cases where the city in the original dataset differs from the city coming from the join with the zipcodes dataset. As we can see, most of the differences are due to data quality issues, for example "Beverly" vs. "Beverly Farms", "New Town" vs. "Newton", "North Falmouth" vs. "N FALMOUTH" etc... Here below only the first 50 rows are displayed.
+
+```{r, echo=FALSE, Univariate_Plots_townNameCheck}
+# This is for checking the cases where the city in the original dataset differs from the city coming from the join with the zipcodes dataset
+# As we can see, most of the differences are due to data quality issues, for example "Beverly" vs. "Beverly Farms", "New Town" vs. "Newton", "North Falmouth" vs. "N FALMOUTH" etc...
+# This means we can reasonably rely on the data coming from joining with the zipcodes dataset
+head(unique(
+  subset(ma2012, 
+         toupper(as.character(ma2012$city)) != toupper(as.character(ma2012$contbr_city)),
+              select = c(city, contbr_city))), 50)
+
+# Let's calculate the total number and amount of contributions by party:
+
+total_contributions_by_party <- ma2012 %>% 
+  group_by(cand_party) %>% 
+  summarise(total_contb_amt = sum(contb_receipt_amt), 
+            total_contb_num = n())
+
+total_contributions <- ma2012 %>% 
+  group_by(1) %>% 
+  summarise(total_contb_amt = sum(contb_receipt_amt), 
+            total_contb_num = n())
+
+total_contributions_by_party$percent_contb_amt <- 
+  total_contributions_by_party$total_contb_amt/total_contributions$total_contb_amt*100
+total_contributions_by_party$percent_contb_num <- 
+  total_contributions_by_party$total_contb_num/total_contributions$total_contb_num*100
+
+```
+
+Below some plots on single variables
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, Univariate_Plots_plots}
+# This is a wordcloud of the contributor's employer (warning: this may take a lot to load)
+#wordcloud(subset(ma2012$contbr_employer, 
+#                 ma2012$contbr_employer != "INFORMATION REQUESTED" & ma2012$contbr_employer != "INFORMATION REQUESTED PER BEST EFFORTS"), 
+#          min.freq = 10, max.words = 200)
+
+# Histogram of contributions by amount
+ggplot(data = subset(ma2012, ma2012$contb_receipt_amt >= 0), aes(x = contb_receipt_amt)) + 
+  geom_histogram(binwidth = 25, color = I('black'), fill = I('#099DD9')) + 
+  scale_x_continuous(limits = c(0, quantile(ma2012$contb_receipt_amt, 0.95)), breaks = seq(0, 1000, 50)) + 
+  labs(x = "Contribution amount ($)", y = "Number of contributions in sample", title = "Histogram of contribution amount")
+
+# Histograms of contributions by distance from Boston
+ggplot(data = subset(ma2012, ma2012$contb_receipt_amt >= 0 & !is.na(ma2012$distance) & ma2012$distance >= 0), aes(x = distance)) + 
+  geom_histogram(binwidth = 5, color = I('black'), fill = I('#099DD9')) + 
+  scale_x_continuous(limits = c(0, 200), breaks = seq(0, 200, 20)) + 
+  labs(x = "Distance from Boston (km)", y = "Number of contributions in sample", title = "Histogram of contributions by distance")
+
+ggplot(data = subset(ma2012, ma2012$contb_receipt_amt >= 0 & !is.na(ma2012$distance) & ma2012$distance >= 0), aes(x = distance)) + 
+  geom_histogram(color = I('black'), fill = I('#099DD9'), binwidth = 0.1) + 
+  scale_x_log10() + 
+  labs(x = "Distance from Boston (km, log10 scale)", y = "Number of contributions in sample", title = "Histogram of contributions by distance (log10 scale)")
+
+# Histograms of number of contributions by days left to the date of elections
+ggplot(data = subset(ma2012, !is.na(ma2012$days_togo)), aes(x = days_togo)) + 
+  geom_histogram(binwidth = 30, color = I('black'), fill = I('#099DD9')) + 
+  scale_x_reverse(breaks = seq(0, 450, 30)) + 
+  coord_cartesian(xlim = c(0, 450)) + 
+  labs(x = "Days before elections", y = "Number of contributions in sample", title = "Histogram of contributions by days to go")
+
+ggplot(data = subset(ma2012, !is.na(ma2012$days_togo) & ma2012$days_togo >= 0), aes(x = sqrt(days_togo))) + 
+  geom_histogram(color = I('black'), fill = I('#099DD9'), binwidth = 1) + 
+  scale_x_reverse() + 
+  coord_cartesian(xlim = c(0, 25)) + 
+  labs(x = "Square root of number of days before elections", y = "Number of contributions in sample", title = "Histogram of contributions by days to go (sqrt scale)")
+
+ggplot(data = subset(ma2012, !is.na(ma2012$days_togo)), aes(x = log10(days_togo))) + 
+  geom_histogram(color = I('black'), fill = I('#099DD9'), binwidth = 0.1) + 
+  scale_x_reverse()+ 
+  coord_cartesian(xlim = c(-0.2, 3)) + 
+  labs(x = "Log10 of number of days before elections", y = "Number of contributions in sample", title = "Histogram of contributions by days to go (log10 scale)")
+
+```
+
+# Univariate Analysis
+
+### What is the structure of your dataset?
+The original dataset proposed for this analysis comes from the Federal Elections Commission website. The dataset contains data about financial contribution to the 2012 Presidential elections.
+
+I have joined this dataset with another one available in the "zipcode" R package in order to geo-referenciate each row by means of the zip code.
+
+The final dataset is composed by 211.303 observations of 28 variables. Most of these variables were present in either of the original datasets, while some were calculated in order to better analyze the data. None of these variables can really be considered an ordered factor.
+
+## Additional observations
+Barack Obama is the candidate having received the majority of contributions, second is Mitt Romney. The Republican Party has many more candidates than any other party.
+
+Democrats have received 79.5% of the total number of contributions and Republicans the 20.3%. Looking at total amounts of contributions, the split is significantly different: Democrats have received the 54.4% of the total amount of contributions, while Republicans have received the 45.3%. This simple statistic already tells us something very clear about the populations that contributed to the fund raising: apparently, the populations supporting the two parties have different behaviours/propensions and the one that supported Republicans is smaller (in Massachusetts), but actually willing to pay much more for supporting its candidates.
+
+Contributions have some highly recurring values, corresponding to "whole" amounts, like 100\$, 200\$, 250\$, etc...
+
+Number of contributions seem to decrease as the distance from Boston center increases. Nonetheless, there still are isolated higher bars corresponding to high values of distance (well visible in both linear and logarithimc scales). These may be due to bigger towns in Massachusetts.
+
+There is a very clear trend in the number of contributions along the time dimension. The number increases strongly as the elections get nearer.
+
+There are some negative contributions, mostly due (as it appears in the receipt descriptions) to balancing transactions, charge backs, internal transfers.
+
+### What is/are the main feature(s) of interest in your dataset?
+The most important features are the amount and number of contributions.
+
+### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+Additional interesting features are: the date of the transaction (seen as days before the elections), the distance of the contributor's town from Boston, the candidate's name and party.
+
+### Did you create any new variables from existing variables in the dataset?
+I have created some variables in order to allow some analyses on elements that I imagined to be meaningful for analyzing this phenomenon.
+
+* distance - distance of the contributor's zip code from the center of Boston (identified by the zip code 02116).
+* days_togo - number of days between the transaction date and the day of the elections (6 November 2012).
+* cand_gender - gender of the candidate
+* cand_party - political party of the candidate
+
+### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+The zipcode of the contributor contained some strange characters (e.g. "*") and I had to remove it in order to use this field. I had also to cut it to the first five characters.
+
+# Bivariate Plots Section
+
+```{r echo=FALSE, Bivariate_Plots}
+
+# Barplot of total number of contributions by party
+plot1 <- qplot(x = cand_party, y = ..count.., data = ma2012, geom = "bar", fill = cand_party, xlab = "Party", ylab = "Count of contributions") + labs(title = "Number of contributions by party")
+
+# Barplot of total amount of contributions by party
+plot2 <- qplot(x = cand_party, y = total_contb_amt, data = total_contributions_by_party, geom = "bar", fill = cand_party, xlab = "Party", ylab = "Total amount of contributions ($)", stat="identity") + labs(title = "Total amount of contributions by party")
+
+grid.arrange(plot1, plot2, ncol = 1)
+
+# Histogram of contributions by amount, faceted by party
+ggplot(data = subset(ma2012, ma2012$contb_receipt_amt >= 0), aes(x = contb_receipt_amt)) + 
+  geom_histogram(binwidth = 25, color = I('black'), fill = I("#F79420")) + 
+  scale_x_continuous(limits = c(0, quantile(ma2012$contb_receipt_amt, 0.95)), breaks = seq(0, 1000, 50)) + 
+  labs(x = "Contribution amount ($)", y = "Number of contributions in sample", title = "Histogram of contribution amount, split by party") + 
+  facet_wrap(~cand_party, ncol = 1, scales="free_y")
+
+# Histograms of contributions by distance from Boston, faceted by party
+ggplot(data = subset(ma2012, ma2012$contb_receipt_amt >= 0 & !is.na(ma2012$distance) & ma2012$distance >= 0), aes(x = distance)) + 
+  geom_histogram(binwidth = 5, color = I('black'), fill = I('#F79420')) + 
+  scale_x_continuous(limits = c(0, 200), breaks = seq(0, 200, 20)) + 
+  labs(x = "Distance from Boston (km)", y = "Number of contributions in sample", title = "Histogram of contributions by distance") + 
+  facet_wrap(~cand_party, ncol = 1, scales="free_y")
+
+# Histograms of number of contributions by days left to the date of elections, faceted by party
+ggplot(data = subset(ma2012, !is.na(ma2012$days_togo)), aes(x = days_togo)) + 
+  geom_histogram(binwidth = 30, color = I('black'), fill = I('#F79420')) + 
+  scale_x_reverse(breaks = seq(0, 450, 30)) + 
+  coord_cartesian(xlim = c(0, 450)) + 
+  labs(x = "Days before elections", y = "Number of contributions in sample", title = "Histogram of contributions by days to go, split by party") + 
+  facet_wrap(~cand_party, ncol = 1, scales="free_y")
+
+# Boxplot of contributions amount by party
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0), aes(x = cand_party, y = contb_receipt_amt)) +
+  geom_boxplot(color = I('black'), fill = I('#F79420')) + coord_cartesian(ylim = c(0, 750)) + 
+  scale_y_continuous(breaks = seq(0, 800, 100)) + 
+  labs(x = "Party", y = "Amount of contribution ($)", title = "Boxplot of contributions by party")
+
+# Scatterlot of contributions amount and days to go
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0), aes(x = days_togo, y = contb_receipt_amt)) + 
+  geom_point(alpha = 1/10, color = I('#F79420')) + geom_smooth() + 
+  scale_x_reverse(breaks = seq(0, 650, 100)) + 
+  coord_cartesian(xlim = c(0, 650), ylim = c(0, 3000)) + 
+  labs(x = "Days before elections", y = "Amount of contribution ($)", title = "Scatterlot of contributions amount and days to go")
+
+with(ma2012, cor.test(days_togo, contb_receipt_amt,
+         method = c("pearson")))
+
+# Scatterlot of contributor distance from Boston and days to go
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0), aes(x = days_togo, y = distance)) + 
+  geom_point(alpha = 1/10, color = I('#F79420')) + 
+  scale_x_reverse(breaks = seq(0, 650, 100)) + 
+  coord_cartesian(xlim = c(0, 650), ylim = c(0, 200)) + geom_smooth() + 
+  labs(x = "Days before elections", y = "Distance from Boston (km)", title = "Scatterlot of contributor distance from Boston and days to go")
+
+with(ma2012, cor.test(days_togo, distance, 
+         method = c("pearson")))
+
+# Scatterlot of contributor distance from Boston and contribution amount
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0), aes(x = distance, y = contb_receipt_amt)) + 
+  geom_point(alpha = 1/10, color = I('#F79420')) + 
+  coord_cartesian(xlim = c(0, 200), ylim = c(0, 5000)) + geom_smooth() + 
+  labs(x = "Distance from Boston (km)", y = "Amount of contribution ($)", title = "Scatterlot of contributor distance from Boston and contribution amount")
+
+with(ma2012, cor.test(distance, contb_receipt_amt, 
+         method = c("pearson")))
+
+# Scatterplots of contribution amount and coordinates
+
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & !is.na(distance)), aes(x = latitude, y = contb_receipt_amt)) + geom_point(alpha = 1/10, color = I('#F79420')) +
+  coord_cartesian(xlim = c(41, 43.2), ylim = c(0, 1000)) + geom_smooth() + 
+  labs(x = "Latitude", y = "Amount of contribution ($)", title = "Scatterlot of contributions amount and latitude")
+
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & !is.na(distance)), aes(x = longitude, y = contb_receipt_amt)) + geom_point(alpha = 1/10, color = I('#F79420')) +
+  coord_cartesian(xlim = c(-74, -69.5), ylim = c(0, 1000)) + geom_smooth() + 
+  labs(x = "Longitude", y = "Amount of contribution ($)", title = "Scatterlot of contributions amount and longitude")
+
+# Here is a very approximate map of the State of Massachusetts
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & !is.na(distance)), aes(x = longitude, y = latitude)) + 
+  geom_point(position = position_jitter(w = 0.01, h = 0.01), alpha = 1/10, color = I('#F79420')) +
+  coord_cartesian(xlim = c(-74, -69.5), ylim = c(41, 43.2)) + 
+  labs(x = "Longitude", y = "Latitude", title = "An approx. map of the Mass. State (scatterplot of latitude and longitude)")
+
+```
+
+# Bivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+
+Contributions have clear common trends across parties, but also interesting differencies. For example:
+
+* The biggest bucket for Democrats corresponds to small contributions (below 100\$), while Republicans have received more bigger contributions. In particular, 75% of contributions for Democrats are below 100\$, while for Republicans, 75% of contributions are 
+* For all parties, 250\$ and 500\$ contributions represent a spike. Apparently, this is a very recurring value. For Democarats, these values are however less popular than smaller ones.
+* Contributors for Democrats seem to be more concentrated within the first 20 km from Boston, while while contributors for Republican are more homogeneously distributed in the distance.
+* Distance from Boston, amount of contribution and number of days before the elections do not seem to have relevant mutual correlation. Still the smoothing function highlights a global decreasing trend of the amount of contributions along the time dimension. Hence: as the elections become nearer, the number of contributions increases, but the amount of each contribution tends to decrease.
+
+### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+
+The amount of contributions has a peak when analyzed against both latitude and longitude. The peak correspond to the coordinates of the Boston city area.
+
+### What was the strongest relationship you found?
+
+The most evident relationship is between party and range of contribution amount. As said above, Democrats have received more contributions than any other party. On the other hand, those contributions were considerably smaller than the contributions received by Republicans. This clearly highlights a difference in the populations of contributors supporting the two parties.
+
+# Multivariate Plots Section
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots}
+
+set.seed(20150521)
+ma2012_samp <- ma2012[sample(1:length(ma2012$cand_nm), 10000), ]
+
+ma2012_samp <- ma2012_samp[,c("cand_nm", "contb_receipt_amt", "distance", "cand_party", "days_togo")]
+
+ggpairs(ma2012_samp, params = c(shape = I('.'), outlier.shape = I('.')))
+
+# The fundraising race towards the elections
+ggplot(data = ma2012, aes(x = days_togo, y = cand_nm)) + 
+  geom_point(alpha = 1/5, color = "forestgreen") + 
+  scale_x_reverse(breaks = seq(-60, 720, 60)) + 
+  coord_cartesian(xlim = c(-60, 720)) + 
+  labs(x = "Days before elections", y = "Candidate", title = "The fundraising race towards the elections")
+
+# Scatterlot of contributions amount and days to go, split by party
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & (cand_party == "Democrat" | cand_party == "Republican")), aes(x = days_togo, y = contb_receipt_amt, color = cand_party)) + 
+  geom_point(alpha = 1/5) + 
+  scale_x_reverse(breaks = seq(0, 650, 100)) + 
+  coord_cartesian(xlim = c(0, 650), ylim = c(0, 3000)) + 
+  labs(x = "Days before elections", y = "Amount of contribution ($)", title = "Scatterlot of contributions amount and days to go, by party")
+
+# Smoothing analysis of trend in contributions amount
+ggplot(aes(x = days_togo, y = contb_receipt_amt), data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & (cand_party == "Democrat" | cand_party == "Republican"))) +
+  geom_smooth(aes(color = cand_party)) + 
+  scale_x_reverse(breaks = seq(0, 600, 100)) + 
+  coord_cartesian(xlim = c(0, 600), ylim = c(0, 2500)) + 
+  labs(x = "Days before elections", y = "Amount of contribution ($)", title = "Analysis of contributions amount trend using smoothing")
+
+total_cont_amt_by_loc <- subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & !is.na(distance) & ma2012$contb_receipt_amt <= quantile(ma2012$contb_receipt_amt, 0.95)) %>% 
+  group_by(latitude, longitude, city) %>% 
+  summarise(total_contb_amt = sum(contb_receipt_amt), 
+            avg_contb_amt = mean(contb_receipt_amt), 
+            total_num_contb = n()
+            )
+
+# Map of contributions in Massachusetts (total amount)
+map1 <- ggplot(data = total_cont_amt_by_loc, 
+       aes(x = longitude, y = latitude)) + 
+  geom_point(aes(size = total_contb_amt, color = total_num_contb)) +
+  coord_cartesian(xlim = c(-74, -69.5), ylim = c(41, 43.2)) + 
+  labs(x = "Longitude", y = "Latitude", title = "Map of contributions in Massachusetts (total amount)")
+
+# Map of contributions in Massachusetts (average amount)
+map2 <- ggplot(data = total_cont_amt_by_loc, 
+       aes(x = longitude, y = latitude)) + 
+  geom_point(aes(size = avg_contb_amt, color = total_num_contb)) +
+  coord_cartesian(xlim = c(-74, -69.5), ylim = c(41, 43.2)) + 
+  labs(x = "Longitude", y = "Latitude", title = "Map of contributions in Massachusetts (average amount)")
+
+grid.arrange(map1, map2, ncol = 1)
+
+# Map of contributions by party in Massachusetts
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & !is.na(distance) & (cand_party == "Democrat" | cand_party == "Republican")), aes(x = longitude, y = latitude)) + 
+  geom_point(position = position_jitter(w = 0.01, h = 0.01), alpha = 1/10, aes(color = cand_party)) +
+  coord_cartesian(xlim = c(-74, -69.5), ylim = c(41, 43.2)) + 
+  labs(x = "Longitude", y = "Latitude", title = "Map of contributions by party in Massachusetts")
+
+```
+
+# Multivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+
+* Using Smoothing function, it was possible to detect a decreasing trend in the amount of contributions as the time distance from elections dicreases.
+* The plot "Map of contributions by party in Massachusetts" is confirming that Republicans have received lots of contributions in the towns which are closer to Boston, while Democrats had a stronger fundraising in the rest of the State. In the  Boston city area, the two major parties seem to have similar contributions.
+
+### Were there any interesting or surprising interactions between features?
+
+* By looking at the "Scatterlot of contributions amount and days to go, by party",it is interesting to see how the fundraising has had alternating phases, where the two main parties have prevailed each other in different times. For deeper political analyses, it might be intriguing matching this trend with actual events such as conventions, public speeches, etc...
+
+### OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.
+
+------
+
+# Final Plots and Summary
+
+### Plot One
+```{r echo=FALSE, Plot_One}
+# Boxplot of contributions amount by party
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0), aes(x = cand_party, y = contb_receipt_amt)) +
+  geom_boxplot(color = I('black'), fill = I('#F79420')) + coord_cartesian(ylim = c(0, 750)) + 
+  scale_y_continuous(breaks = seq(0, 800, 100)) + 
+  labs(x = "Party", y = "Amount of contribution ($)", title = "Boxplot of contributions by party")
+```
+
+### Description One
+We know from previous results that contributions received by Democrats in Massachusetts are greater both in term of number and total amount. Nonetheless, thanks to this plot, it is possible to understand how the two major parties are funded. Democrats have received more small contributions, while Republicans have received less, but significantly bigger, contributions.
+
+### Plot Two
+```{r echo=FALSE, Plot_Two}
+# Scatterlot of contributions amount and days to go, split by party
+ggplot(data = subset(ma2012, !is.na(ma2012$contb_receipt_amt) & ma2012$contb_receipt_amt > 0 & (cand_party == "Democrat" | cand_party == "Republican")), aes(x = days_togo, y = contb_receipt_amt, color = cand_party)) + 
+  geom_point(alpha = 1/5) + 
+  scale_x_reverse(breaks = seq(0, 650, 100)) + 
+  coord_cartesian(xlim = c(0, 650), ylim = c(0, 3000)) + 
+  labs(x = "Days before elections", y = "Amount of contribution ($)", title = "Scatterlot of contributions amount and days to go, by party")
+```
+
+### Description Two
+This plot displayes contributions in terms of submission date and amount. The two colors represent the two major parties. As mentioned above, this plot helps identifying alternate phases in the fundraising for the two major parties. This kind of insights could be related to information related to external events in order to understand how they influence the fundraising phenomenon.
+
+### Plot Three
+```{r echo=FALSE, Plot_Three}
+grid.arrange(map1, map2, ncol = 1)
+```
+
+### Description Three
+Here are two maps of the State of Massachusetts, where each point represents the contributions for that location. In the upper plot the point size corresponds to the total amount of contributions, while in the lower plot the size stands for the average amount. As we can see, while a lot of contributions came from the closer Boston area, actually the average amount is less concentrated.
+
+------
+
+# Reflection
+The dynamics of the fundraising campaigns appear to be influenced by several factors.
+
+* The time to the elections has clearly an impact. The number of contributions raises very quickly as the elections get close. At the same time, those increasing (in number) contributions become smaller as the time passes. Apparently, bigger contributions (perhaps from companies or richer individuals) happen initially (as a sort of kick-off of the campaigns) and the people's contributions arises at the end of the campaigns.
+* Geography (and demographics) is another important element. Some parties are stronger than other within certain social classes and consequently more contributions may come from specific towns/locations where such classes are more concentrated. Might be interesting to compare this trend with the average income of each town, to see for example if every location contributes the same (compared to the average income), or if there are some towns where people is actually contributing more, not only in absolute terms, but also in comparison to the average income. Such results could reveal interesting insights about the people's engagement with politics.
+* Political and/or social events have impacts on the contributions and may cause parties to receive alternatively more funds within certain periods. Analyzing this aspect more in depth could lead to even predictive results, which might eventually lead to be able to foresee the impact (in terms of contributions) of possible actions that the candidate or the party may want to take during the political campaign.
+
